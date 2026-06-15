@@ -22,8 +22,6 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub const ZERO: Self = Self::new(0.0, 0.0, 0.0);
-
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
@@ -92,10 +90,7 @@ impl Mat4 {
     pub const fn identity() -> Self {
         Self {
             values: [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }
     }
@@ -112,10 +107,16 @@ impl Mat4 {
         let (sin, cos) = angle.sin_cos();
         Self {
             values: [
-                cos, 0.0, -sin, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                sin, 0.0, cos, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                cos, 0.0, -sin, 0.0, 0.0, 1.0, 0.0, 0.0, sin, 0.0, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    pub fn rotation_x(angle: f32) -> Self {
+        let (sin, cos) = angle.sin_cos();
+        Self {
+            values: [
+                1.0, 0.0, 0.0, 0.0, 0.0, cos, sin, 0.0, 0.0, -sin, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }
     }
@@ -190,11 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn vec3_zero_has_zero_components() {
-        assert_eq!(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.0));
-    }
-
-    #[test]
     fn vec3_adds_component_wise() {
         let result = Vec3::new(1.0, -2.0, 3.5) + Vec3::new(4.0, 2.5, -1.5);
 
@@ -261,12 +257,7 @@ mod tests {
 
         assert_eq!(
             matrix.values,
-            [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                2.0, -3.0, 4.5, 1.0,
-            ]
+            [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, -3.0, 4.5, 1.0,]
         );
     }
 
@@ -285,10 +276,19 @@ mod tests {
         assert_matrix_close(
             matrix,
             [
-                0.0, 0.0, -1.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn rotation_x_by_quarter_turn_uses_column_major_layout() {
+        let matrix = Mat4::rotation_x(std::f32::consts::FRAC_PI_2);
+
+        assert_matrix_close(
+            matrix,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         );
     }
@@ -300,10 +300,7 @@ mod tests {
         assert_matrix_close(
             matrix,
             [
-                0.5, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, -1.2, -1.0,
-                0.0, 0.0, -2.2, 0.0,
+                0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.2, -1.0, 0.0, 0.0, -2.2, 0.0,
             ],
         );
     }

@@ -3,6 +3,7 @@ mod error;
 mod input;
 mod math;
 mod mesh;
+mod mtl;
 mod obj;
 mod ppm;
 mod renderer;

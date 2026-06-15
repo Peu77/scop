@@ -1,4 +1,10 @@
-use glfw::{Action, Key, Window, WindowEvent};
+use glfw::{Action, Key, MouseButton, Window, WindowEvent};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MouseDelta {
+    pub x: f32,
+    pub y: f32,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Movement {
@@ -8,12 +14,17 @@ pub struct Movement {
 }
 
 #[derive(Debug, Default)]
-pub struct Keyboard {
+pub struct Input {
     texture_toggle_requested: bool,
+    mode_toggle_requested: bool,
     reset_requested: bool,
+    dragging: bool,
+    cursor_position: Option<(f64, f64)>,
+    mouse_delta: MouseDelta,
+    scroll_delta: f32,
 }
 
-impl Keyboard {
+impl Input {
     pub fn handle_event(&mut self, window: &mut Window, event: WindowEvent) {
         match event {
             WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
@@ -22,18 +33,31 @@ impl Keyboard {
             WindowEvent::Key(Key::T, _, Action::Press, _) => {
                 self.texture_toggle_requested = true;
             }
+            WindowEvent::Key(Key::F, _, Action::Press, _) => {
+                self.mode_toggle_requested = true;
+            }
             WindowEvent::Key(Key::R, _, Action::Press, _) => {
                 self.reset_requested = true;
             }
+            WindowEvent::MouseButton(MouseButton::Button1, Action::Press, _) => {
+                self.dragging = true;
+                self.cursor_position = None;
+            }
+            WindowEvent::MouseButton(MouseButton::Button1, Action::Release, _) => {
+                self.dragging = false;
+                self.cursor_position = None;
+            }
+            WindowEvent::CursorPos(x, y) if self.dragging => {
+                if let Some((previous_x, previous_y)) = self.cursor_position {
+                    self.mouse_delta.x += (x - previous_x) as f32;
+                    self.mouse_delta.y += (y - previous_y) as f32;
+                }
+                self.cursor_position = Some((x, y));
+            }
+            WindowEvent::Scroll(_, y) => {
+                self.scroll_delta += y as f32;
+            }
             _ => {}
-        }
-    }
-
-    pub fn movement(&self, window: &Window) -> Movement {
-        Movement {
-            x: axis(window, Key::A, Key::Left, Key::D, Key::Right),
-            y: axis(window, Key::S, Key::Down, Key::W, Key::Up),
-            z: axis(window, Key::E, Key::PageDown, Key::Q, Key::PageUp),
         }
     }
 
@@ -41,8 +65,28 @@ impl Keyboard {
         std::mem::take(&mut self.texture_toggle_requested)
     }
 
+    pub fn take_mode_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.mode_toggle_requested)
+    }
+
     pub fn take_reset(&mut self) -> bool {
         std::mem::take(&mut self.reset_requested)
+    }
+
+    pub fn take_mouse_delta(&mut self) -> MouseDelta {
+        std::mem::take(&mut self.mouse_delta)
+    }
+
+    pub fn take_scroll_delta(&mut self) -> f32 {
+        std::mem::take(&mut self.scroll_delta)
+    }
+
+    pub fn movement(&self, window: &Window) -> Movement {
+        Movement {
+            x: axis(window, Key::D, Key::Right, Key::A, Key::Left),
+            y: axis(window, Key::W, Key::Up, Key::S, Key::Down),
+            z: axis(window, Key::Q, Key::PageUp, Key::E, Key::PageDown),
+        }
     }
 }
 
