@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::math::{Vec2, Vec3};
 
 #[repr(C)]
@@ -11,6 +13,16 @@ pub struct Vertex {
 #[derive(Debug)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
+    pub textures: Vec<PathBuf>,
+    pub batches: Vec<DrawBatch>,
+    pub has_material_library: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrawBatch {
+    pub first_vertex: usize,
+    pub vertex_count: usize,
+    pub texture: Option<usize>,
 }
 
 impl Mesh {

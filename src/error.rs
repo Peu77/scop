@@ -10,6 +10,10 @@ pub enum AppError {
         path: PathBuf,
         source: std::io::Error,
     },
+    Mtl {
+        line: usize,
+        message: String,
+    },
     Obj {
         line: usize,
         message: String,
@@ -24,6 +28,9 @@ impl Display for AppError {
         match self {
             Self::Glfw(message) => write!(formatter, "GLFW error: {message}"),
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
+            Self::Mtl { line, message } => {
+                write!(formatter, "invalid MTL at line {line}: {message}")
+            }
             Self::Obj { line, message } => {
                 write!(formatter, "invalid OBJ at line {line}: {message}")
             }
