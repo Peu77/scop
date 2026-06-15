@@ -167,12 +167,151 @@ impl Mul for Mat4 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mat4, Vec3};
+    use super::{Mat4, Vec2, Vec3};
+
+    const EPSILON: f32 = 1.0e-6;
+
+    fn assert_f32_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn assert_matrix_close(actual: Mat4, expected: [f32; 16]) {
+        for (actual, expected) in actual.values.into_iter().zip(expected) {
+            assert_f32_close(actual, expected);
+        }
+    }
 
     #[test]
-    fn identity_does_not_change_a_matrix() {
+    fn vec2_new_sets_both_components() {
+        assert_eq!(Vec2::new(1.5, -2.0), Vec2 { x: 1.5, y: -2.0 });
+    }
+
+    #[test]
+    fn vec3_zero_has_zero_components() {
+        assert_eq!(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn vec3_adds_component_wise() {
+        let result = Vec3::new(1.0, -2.0, 3.5) + Vec3::new(4.0, 2.5, -1.5);
+
+        assert_eq!(result, Vec3::new(5.0, 0.5, 2.0));
+    }
+
+    #[test]
+    fn vec3_add_assign_updates_each_component() {
+        let mut value = Vec3::new(1.0, 2.0, 3.0);
+
+        value += Vec3::new(-1.0, 4.0, 0.5);
+
+        assert_eq!(value, Vec3::new(0.0, 6.0, 3.5));
+    }
+
+    #[test]
+    fn vec3_subtracts_component_wise() {
+        let result = Vec3::new(5.0, 3.0, -2.0) - Vec3::new(2.0, 4.0, -5.0);
+
+        assert_eq!(result, Vec3::new(3.0, -1.0, 3.0));
+    }
+
+    #[test]
+    fn vec3_multiplies_each_component_by_scalar() {
+        assert_eq!(Vec3::new(1.5, -2.0, 4.0) * 2.0, Vec3::new(3.0, -4.0, 8.0));
+    }
+
+    #[test]
+    fn vec3_divides_each_component_by_scalar() {
+        assert_eq!(Vec3::new(3.0, -4.0, 8.0) / 2.0, Vec3::new(1.5, -2.0, 4.0));
+    }
+
+    #[test]
+    fn vec3_min_selects_smallest_component_values() {
+        let result = Vec3::new(1.0, 5.0, -3.0).min(Vec3::new(2.0, 4.0, -5.0));
+
+        assert_eq!(result, Vec3::new(1.0, 4.0, -5.0));
+    }
+
+    #[test]
+    fn vec3_max_selects_largest_component_values() {
+        let result = Vec3::new(1.0, 5.0, -3.0).max(Vec3::new(2.0, 4.0, -5.0));
+
+        assert_eq!(result, Vec3::new(2.0, 5.0, -3.0));
+    }
+
+    #[test]
+    fn identity_is_neutral_on_left_side() {
         let matrix = Mat4::translation(Vec3::new(1.0, 2.0, 3.0));
+
         assert_eq!(Mat4::identity() * matrix, matrix);
+    }
+
+    #[test]
+    fn identity_is_neutral_on_right_side() {
+        let matrix = Mat4::translation(Vec3::new(1.0, 2.0, 3.0));
+
         assert_eq!(matrix * Mat4::identity(), matrix);
+    }
+
+    #[test]
+    fn translation_places_offset_in_last_column() {
+        let matrix = Mat4::translation(Vec3::new(2.0, -3.0, 4.5));
+
+        assert_eq!(
+            matrix.values,
+            [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                2.0, -3.0, 4.5, 1.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn multiplying_translations_combines_their_offsets() {
+        let first = Mat4::translation(Vec3::new(1.0, 2.0, 3.0));
+        let second = Mat4::translation(Vec3::new(-4.0, 5.0, 1.0));
+
+        assert_eq!(first * second, Mat4::translation(Vec3::new(-3.0, 7.0, 4.0)));
+    }
+
+    #[test]
+    fn rotation_y_by_quarter_turn_uses_column_major_layout() {
+        let matrix = Mat4::rotation_y(std::f32::consts::FRAC_PI_2);
+
+        assert_matrix_close(
+            matrix,
+            [
+                0.0, 0.0, -1.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn perspective_builds_expected_projection_matrix() {
+        let matrix = Mat4::perspective(std::f32::consts::FRAC_PI_2, 2.0, 1.0, 11.0);
+
+        assert_matrix_close(
+            matrix,
+            [
+                0.5, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, -1.2, -1.0,
+                0.0, 0.0, -2.2, 0.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn as_ptr_points_to_first_matrix_value() {
+        let matrix = Mat4::translation(Vec3::new(2.0, 3.0, 4.0));
+
+        assert_eq!(matrix.as_ptr(), matrix.values.as_ptr());
     }
 }
