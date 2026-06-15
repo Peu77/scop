@@ -3,10 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, Result};
+use crate::math::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub struct Material {
+    pub diffuse_color: Option<Vec3>,
     pub diffuse_texture: Option<PathBuf>,
+    pub normal_texture: Option<PathBuf>,
 }
 
 pub fn load(path: &Path) -> Result<HashMap<String, Material>> {
@@ -46,6 +49,21 @@ fn parse(source: &str, directory: &Path) -> Result<HashMap<String, Material>> {
                 materials.entry(name.clone()).or_default().diffuse_texture =
                     Some(directory.join(texture));
             }
+            Some("Kd") => {
+                let name = current_name
+                    .as_ref()
+                    .ok_or_else(|| mtl_error(line_number, "Kd appears before newmtl"))?;
+                materials.entry(name.clone()).or_default().diffuse_color =
+                    Some(parse_color(fields, line_number)?);
+            }
+            Some("map_Bump" | "map_bump" | "bump" | "norm") => {
+                let name = current_name
+                    .as_ref()
+                    .ok_or_else(|| mtl_error(line_number, "normal map appears before newmtl"))?;
+                let texture = parse_texture_path(fields.collect(), line_number)?;
+                materials.entry(name.clone()).or_default().normal_texture =
+                    Some(directory.join(texture));
+            }
             _ => {}
         }
     }
@@ -60,6 +78,20 @@ fn parse_texture_path(fields: Vec<&str>, line: usize) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+fn parse_color<'a>(mut fields: impl Iterator<Item = &'a str>, line: usize) -> Result<Vec3> {
+    let r = parse_float(fields.next(), line, "diffuse red")?;
+    let g = parse_float(fields.next(), line, "diffuse green")?;
+    let b = parse_float(fields.next(), line, "diffuse blue")?;
+    Ok(Vec3::new(r, g, b))
+}
+
+fn parse_float(value: Option<&str>, line: usize, label: &str) -> Result<f32> {
+    value
+        .ok_or_else(|| mtl_error(line, format!("missing {label}")))?
+        .parse()
+        .map_err(|_| mtl_error(line, format!("invalid {label}")))
+}
+
 fn mtl_error(line: usize, message: impl Into<String>) -> AppError {
     AppError::Mtl {
         line,
@@ -70,6 +102,8 @@ fn mtl_error(line: usize, message: impl Into<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    use crate::math::Vec3;
 
     use super::parse;
 
@@ -98,6 +132,30 @@ mod tests {
         assert_eq!(
             materials["painted"].diffuse_texture,
             Some(PathBuf::from("models/paint.ppm"))
+        );
+    }
+
+    #[test]
+    fn parse_resolves_normal_texture_relative_to_mtl_directory() {
+        let materials = parse(
+            "newmtl painted\nmap_Bump textures/normal.ppm\n",
+            Path::new("models"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            materials["painted"].normal_texture,
+            Some(PathBuf::from("models/textures/normal.ppm"))
+        );
+    }
+
+    #[test]
+    fn parse_reads_diffuse_color() {
+        let materials = parse("newmtl bark\nKd 0.2 0.1 0.05\n", Path::new("models")).unwrap();
+
+        assert_eq!(
+            materials["bark"].diffuse_color,
+            Some(Vec3::new(0.2, 0.1, 0.05))
         );
     }
 

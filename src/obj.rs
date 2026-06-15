@@ -425,6 +425,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    use crate::math::Vec3;
     use crate::mtl::Material;
 
     use super::{build_mesh, load, parse, parse_document};
