@@ -16,6 +16,7 @@ pub struct Movement {
 #[derive(Debug, Default)]
 pub struct Input {
     texture_toggle_requested: bool,
+    shader_toggle_requested: bool,
     mode_toggle_requested: bool,
     reset_requested: bool,
     dragging: bool,
@@ -32,6 +33,9 @@ impl Input {
             }
             WindowEvent::Key(Key::T, _, Action::Press, _) => {
                 self.texture_toggle_requested = true;
+            }
+            WindowEvent::Key(Key::P, _, Action::Press, _) => {
+                self.shader_toggle_requested = true;
             }
             WindowEvent::Key(Key::F, _, Action::Press, _) => {
                 self.mode_toggle_requested = true;
@@ -63,6 +67,10 @@ impl Input {
 
     pub fn take_texture_toggle(&mut self) -> bool {
         std::mem::take(&mut self.texture_toggle_requested)
+    }
+
+    pub fn take_shader_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.shader_toggle_requested)
     }
 
     pub fn take_mode_toggle(&mut self) -> bool {

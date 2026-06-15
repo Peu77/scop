@@ -118,6 +118,7 @@ fn draw_frame(renderer: &Renderer, window: &mut PWindow, state: &State) {
         &(projection * view * model),
         &model,
         state.texture_blend,
+        state.effect_enabled,
         framebuffer_size,
     );
     window.swap_buffers();
@@ -132,6 +133,7 @@ struct State {
     camera_distance: f32,
     texture_target: f32,
     texture_blend: f32,
+    effect_enabled: bool,
 }
 
 impl Default for State {
@@ -144,6 +146,7 @@ impl Default for State {
             camera_distance: 4.0,
             texture_target: 0.0,
             texture_blend: 0.0,
+            effect_enabled: false,
         }
     }
 }
@@ -152,6 +155,9 @@ impl State {
     fn update(&mut self, input: &mut Input, window: &glfw::Window, delta_time: f32) {
         if input.take_texture_toggle() {
             self.texture_target = if self.texture_target < 0.5 { 1.0 } else { 0.0 };
+        }
+        if input.take_shader_toggle() {
+            self.effect_enabled = !self.effect_enabled;
         }
         if input.take_mode_toggle() {
             self.automatic_rotation = !self.automatic_rotation;

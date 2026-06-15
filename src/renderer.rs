@@ -10,9 +10,12 @@ use crate::shader;
 
 const VERTEX_SHADER: &str = include_str!("shaders/model.vert");
 const FRAGMENT_SHADER: &str = include_str!("shaders/model.frag");
+const EFFECT_VERTEX_SHADER: &str = include_str!("shaders/effect.vert");
+const EFFECT_FRAGMENT_SHADER: &str = include_str!("shaders/effect.frag");
 
 pub struct Renderer {
-    program: u32,
+    standard_program: ShaderProgram,
+    effect_program: ShaderProgram,
     vertex_array: u32,
     vertex_buffer: u32,
     textures: Vec<u32>,
@@ -21,6 +24,11 @@ pub struct Renderer {
     batches: Vec<RenderBatch>,
     fallback_texture: usize,
     use_fallback_for_untextured: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ShaderProgram {
+    id: u32,
     mvp_location: i32,
     model_location: i32,
     blend_location: i32,
@@ -65,7 +73,17 @@ impl Renderer {
             .map(RenderBatch::try_from)
             .collect::<Result<Vec<_>>>()?;
 
-        let program = shader::load_program(VERTEX_SHADER, FRAGMENT_SHADER)?;
+        let standard_program = create_shader_program(VERTEX_SHADER, FRAGMENT_SHADER)?;
+        let effect_program =
+            match create_shader_program(EFFECT_VERTEX_SHADER, EFFECT_FRAGMENT_SHADER) {
+                Ok(program) => program,
+                Err(error) => {
+                    unsafe {
+                        gl::DeleteProgram(standard_program.id);
+                    }
+                    return Err(error);
+                }
+            };
         let mut vertex_array = 0;
         let mut vertex_buffer = 0;
 
@@ -130,11 +148,10 @@ impl Renderer {
                 (size_of::<f32>() * 14) as *const c_void,
             );
 
-            gl::UseProgram(program);
-            gl::Uniform1i(gl::GetUniformLocation(program, c"u_texture".as_ptr()), 0);
-            gl::Uniform1i(gl::GetUniformLocation(program, c"u_normal_map".as_ptr()), 1);
             gl::Enable(gl::DEPTH_TEST);
         }
+        set_texture_units(standard_program.id);
+        set_texture_units(effect_program.id);
 
         let mut textures = Vec::with_capacity(material_textures.len() + 1);
         for image in material_textures.iter().chain(std::iter::once(fallback)) {
@@ -144,26 +161,9 @@ impl Renderer {
         let normal_maps = normal_maps.iter().map(upload_texture).collect::<Vec<_>>();
         let fallback_normal_map = upload_texture(&flat_normal_map());
 
-        let mvp_location = unsafe { gl::GetUniformLocation(program, c"u_mvp".as_ptr()) };
-        let model_location = unsafe { gl::GetUniformLocation(program, c"u_model".as_ptr()) };
-        let blend_location =
-            unsafe { gl::GetUniformLocation(program, c"u_texture_blend".as_ptr()) };
-        if mvp_location < 0 || model_location < 0 || blend_location < 0 {
-            unsafe {
-                gl::DeleteTextures(textures.len() as i32, textures.as_ptr());
-                gl::DeleteTextures(normal_maps.len() as i32, normal_maps.as_ptr());
-                gl::DeleteTextures(1, &fallback_normal_map);
-                gl::DeleteBuffers(1, &vertex_buffer);
-                gl::DeleteVertexArrays(1, &vertex_array);
-                gl::DeleteProgram(program);
-            }
-            return Err(AppError::OpenGl(
-                "a required shader uniform could not be found".into(),
-            ));
-        }
-
         Ok(Self {
-            program,
+            standard_program,
+            effect_program,
             vertex_array,
             vertex_buffer,
             textures,
@@ -172,20 +172,30 @@ impl Renderer {
             batches,
             fallback_texture,
             use_fallback_for_untextured: !mesh.has_material_library,
-            mvp_location,
-            model_location,
-            blend_location,
         })
     }
 
-    pub fn draw(&self, mvp: &Mat4, model: &Mat4, texture_blend: f32, framebuffer_size: (i32, i32)) {
+    pub fn draw(
+        &self,
+        mvp: &Mat4,
+        model: &Mat4,
+        texture_blend: f32,
+        effect_enabled: bool,
+        framebuffer_size: (i32, i32),
+    ) {
+        let program = if effect_enabled {
+            self.effect_program
+        } else {
+            self.standard_program
+        };
+
         unsafe {
             gl::Viewport(0, 0, framebuffer_size.0, framebuffer_size.1);
             gl::ClearColor(0.055, 0.06, 0.075, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-            gl::UseProgram(self.program);
-            gl::UniformMatrix4fv(self.mvp_location, 1, gl::FALSE, mvp.as_ptr());
-            gl::UniformMatrix4fv(self.model_location, 1, gl::FALSE, model.as_ptr());
+            gl::UseProgram(program.id);
+            gl::UniformMatrix4fv(program.mvp_location, 1, gl::FALSE, mvp.as_ptr());
+            gl::UniformMatrix4fv(program.model_location, 1, gl::FALSE, model.as_ptr());
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindVertexArray(self.vertex_array);
             for batch in &self.batches {
@@ -194,7 +204,7 @@ impl Renderer {
                         .then_some(self.fallback_texture)
                 });
                 gl::Uniform1f(
-                    self.blend_location,
+                    program.blend_location,
                     if texture.is_some() {
                         texture_blend
                     } else {
@@ -225,8 +235,38 @@ impl Drop for Renderer {
             gl::DeleteTextures(1, &self.fallback_normal_map);
             gl::DeleteBuffers(1, &self.vertex_buffer);
             gl::DeleteVertexArrays(1, &self.vertex_array);
-            gl::DeleteProgram(self.program);
+            gl::DeleteProgram(self.standard_program.id);
+            gl::DeleteProgram(self.effect_program.id);
         }
+    }
+}
+
+fn create_shader_program(vertex_source: &str, fragment_source: &str) -> Result<ShaderProgram> {
+    let id = shader::load_program(vertex_source, fragment_source)?;
+    let mvp_location = unsafe { gl::GetUniformLocation(id, c"u_mvp".as_ptr()) };
+    let model_location = unsafe { gl::GetUniformLocation(id, c"u_model".as_ptr()) };
+    let blend_location = unsafe { gl::GetUniformLocation(id, c"u_texture_blend".as_ptr()) };
+    if mvp_location < 0 || model_location < 0 || blend_location < 0 {
+        unsafe {
+            gl::DeleteProgram(id);
+        }
+        return Err(AppError::OpenGl(
+            "a required shader uniform could not be found".into(),
+        ));
+    }
+    Ok(ShaderProgram {
+        id,
+        mvp_location,
+        model_location,
+        blend_location,
+    })
+}
+
+fn set_texture_units(program: u32) {
+    unsafe {
+        gl::UseProgram(program);
+        gl::Uniform1i(gl::GetUniformLocation(program, c"u_texture".as_ptr()), 0);
+        gl::Uniform1i(gl::GetUniformLocation(program, c"u_normal_map".as_ptr()), 1);
     }
 }
 
