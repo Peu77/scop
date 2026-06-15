@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use std::path::Path;
 
-use glfw::{Context, OpenGlProfileHint, WindowHint};
+use glfw::{Context, Glfw, GlfwReceiver, OpenGlProfileHint, PWindow, WindowEvent, WindowHint};
 
 use crate::error::{AppError, Result};
 use crate::input::{Input, MouseDelta, Movement};
@@ -23,8 +23,27 @@ const MAX_CAMERA_DISTANCE: f32 = 12.0;
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 const TEXTURE_PATH: &str = "assets/texture.ppm";
 
+type EventReceiver = GlfwReceiver<(f64, WindowEvent)>;
+type WindowContext = (Glfw, PWindow, EventReceiver);
+
 pub fn run(mesh: Mesh) -> Result<()> {
-    let triangle_count = mesh.triangle_count();
+    let (mut glfw, mut window, events) = create_window(mesh.triangle_count())?;
+    let renderer = create_renderer(&mesh)?;
+    let mut input = Input::default();
+    let mut state = State::default();
+    let mut previous_frame = Instant::now();
+
+    while !window.should_close() {
+        let delta_time = frame_delta(&mut previous_frame);
+        poll_input(&mut glfw, &mut window, &events, &mut input);
+        state.update(&mut input, &window, delta_time);
+        draw_frame(&renderer, &mut window, &state);
+    }
+
+    Ok(())
+}
+
+fn create_window(triangle_count: usize) -> Result<WindowContext> {
     let mut glfw =
         glfw::init(glfw::fail_on_errors).map_err(|error| AppError::Glfw(error.to_string()))?;
     glfw.window_hint(WindowHint::ContextVersion(3, 3));
@@ -50,46 +69,57 @@ pub fn run(mesh: Mesh) -> Result<()> {
     glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
     gl::load_with(|symbol| window.get_proc_address(symbol));
 
+    Ok((glfw, window, events))
+}
+
+fn create_renderer(mesh: &Mesh) -> Result<Renderer> {
     let material_textures = mesh
         .textures
         .iter()
         .map(|path| ppm::load(path))
         .collect::<Result<Vec<_>>>()?;
     let fallback_texture = ppm::load(Path::new(TEXTURE_PATH))?;
-    let renderer = Renderer::new(&mesh, &material_textures, &fallback_texture)?;
-    let mut input = Input::default();
-    let mut state = State::default();
-    let mut previous_frame = Instant::now();
+    Renderer::new(mesh, &material_textures, &fallback_texture)
+}
 
-    while !window.should_close() {
-        let now = Instant::now();
-        let delta_time = (now - previous_frame).as_secs_f32().min(0.1);
-        previous_frame = now;
+fn frame_delta(previous_frame: &mut Instant) -> f32 {
+    let now = Instant::now();
+    let delta_time = (now - *previous_frame).as_secs_f32().min(0.1);
+    *previous_frame = now;
+    delta_time
+}
 
-        glfw.poll_events();
-        for (_, event) in glfw::flush_messages(&events) {
-            input.handle_event(&mut window, event);
-        }
+fn poll_input(
+    glfw: &mut Glfw,
+    window: &mut PWindow,
+    events: &EventReceiver,
+    input: &mut Input,
+) {
+    glfw.poll_events();
+    for (_, event) in glfw::flush_messages(events) {
+        input.handle_event(window, event);
+    }
+}
 
-        state.update(&mut input, &window, delta_time);
-        let framebuffer_size = window.get_framebuffer_size();
-        if framebuffer_size.0 > 0 && framebuffer_size.1 > 0 {
-            let aspect = framebuffer_size.0 as f32 / framebuffer_size.1 as f32;
-            let projection = Mat4::perspective(55_f32.to_radians(), aspect, 0.1, 100.0);
-            let view = Mat4::translation(Vec3::new(0.0, 0.0, -state.camera_distance));
-            let model = Mat4::translation(state.position)
-                * Mat4::rotation_x(state.pitch)
-                * Mat4::rotation_y(state.yaw);
-            renderer.draw(
-                &(projection * view * model),
-                state.texture_blend,
-                framebuffer_size,
-            );
-            window.swap_buffers();
-        }
+fn draw_frame(renderer: &Renderer, window: &mut PWindow, state: &State) {
+    let framebuffer_size = window.get_framebuffer_size();
+    if framebuffer_size.0 <= 0 || framebuffer_size.1 <= 0 {
+        return;
     }
 
-    Ok(())
+    let aspect = framebuffer_size.0 as f32 / framebuffer_size.1 as f32;
+    let projection = Mat4::perspective(55_f32.to_radians(), aspect, 0.1, 100.0);
+    let view = Mat4::translation(Vec3::new(0.0, 0.0, -state.camera_distance));
+    let model = Mat4::translation(state.position)
+        * Mat4::rotation_x(state.pitch)
+        * Mat4::rotation_y(state.yaw);
+    
+    renderer.draw(
+        &(projection * view * model),
+        state.texture_blend,
+        framebuffer_size,
+    );
+    window.swap_buffers();
 }
 
 #[derive(Debug)]
