@@ -78,8 +78,13 @@ fn create_renderer(mesh: &Mesh) -> Result<Renderer> {
         .iter()
         .map(|path| ppm::load(path))
         .collect::<Result<Vec<_>>>()?;
+    let normal_maps = mesh
+        .normal_maps
+        .iter()
+        .map(|path| ppm::load(path))
+        .collect::<Result<Vec<_>>>()?;
     let fallback_texture = ppm::load(Path::new(TEXTURE_PATH))?;
-    Renderer::new(mesh, &material_textures, &fallback_texture)
+    Renderer::new(mesh, &material_textures, &normal_maps, &fallback_texture)
 }
 
 fn frame_delta(previous_frame: &mut Instant) -> f32 {
@@ -89,12 +94,7 @@ fn frame_delta(previous_frame: &mut Instant) -> f32 {
     delta_time
 }
 
-fn poll_input(
-    glfw: &mut Glfw,
-    window: &mut PWindow,
-    events: &EventReceiver,
-    input: &mut Input,
-) {
+fn poll_input(glfw: &mut Glfw, window: &mut PWindow, events: &EventReceiver, input: &mut Input) {
     glfw.poll_events();
     for (_, event) in glfw::flush_messages(events) {
         input.handle_event(window, event);
@@ -113,9 +113,10 @@ fn draw_frame(renderer: &Renderer, window: &mut PWindow, state: &State) {
     let model = Mat4::translation(state.position)
         * Mat4::rotation_x(state.pitch)
         * Mat4::rotation_y(state.yaw);
-    
+
     renderer.draw(
         &(projection * view * model),
+        &model,
         state.texture_blend,
         framebuffer_size,
     );

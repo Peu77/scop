@@ -12,6 +12,7 @@ use crate::mtl::{self, Material};
 struct FaceIndex {
     position: usize,
     texture: Option<usize>,
+    normal: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -24,6 +25,7 @@ struct Face {
 struct ObjDocument {
     positions: Vec<Vec3>,
     texture_coordinates: Vec<Vec2>,
+    normals: Vec<Vec3>,
     faces: Vec<Face>,
     material_libraries: Vec<PathBuf>,
 }
@@ -50,6 +52,7 @@ fn parse(source: &str) -> Result<Mesh> {
 fn parse_document(source: &str) -> Result<ObjDocument> {
     let mut positions = Vec::new();
     let mut texture_coordinates = Vec::new();
+    let mut normals = Vec::new();
     let mut faces = Vec::new();
     let mut material_libraries = Vec::new();
     let mut current_material = None;
@@ -65,6 +68,7 @@ fn parse_document(source: &str) -> Result<ObjDocument> {
         match fields.next() {
             Some("v") => positions.push(parse_position(fields, line_number)?),
             Some("vt") => texture_coordinates.push(parse_texture_coordinate(fields, line_number)?),
+            Some("vn") => normals.push(parse_position(fields, line_number)?.normalized()),
             Some("mtllib") => {
                 let libraries = fields.map(PathBuf::from).collect::<Vec<_>>();
                 if libraries.is_empty() {
@@ -86,6 +90,7 @@ fn parse_document(source: &str) -> Result<ObjDocument> {
                             field,
                             positions.len(),
                             texture_coordinates.len(),
+                            normals.len(),
                             line_number,
                         )
                     })
@@ -115,6 +120,7 @@ fn parse_document(source: &str) -> Result<ObjDocument> {
     Ok(ObjDocument {
         positions,
         texture_coordinates,
+        normals,
         faces,
         material_libraries,
     })
@@ -137,15 +143,26 @@ fn build_mesh(document: ObjDocument, materials: &HashMap<String, Material>) -> R
     let mut vertices = Vec::with_capacity(triangle_count * 3);
     let mut textures = Vec::new();
     let mut texture_indices = HashMap::new();
+    let mut normal_maps = Vec::new();
+    let mut normal_map_indices = HashMap::new();
     let mut batches = Vec::new();
 
     for (face_index, face) in document.faces.into_iter().enumerate() {
-        let shade = face_shade(face_index);
+        let color = material_color(face.material.as_deref(), materials)
+            .unwrap_or_else(|| generated_face_color(face_index));
         let texture = resolve_material_texture(
             face.material.as_deref(),
             materials,
             &mut textures,
             &mut texture_indices,
+            MaterialTexture::Diffuse,
+        )?;
+        let normal_map = resolve_material_texture(
+            face.material.as_deref(),
+            materials,
+            &mut normal_maps,
+            &mut normal_map_indices,
+            MaterialTexture::Normal,
         )?;
         let first_vertex = vertices.len();
         for index in 1..face.indices.len() - 1 {
@@ -154,16 +171,35 @@ fn build_mesh(document: ObjDocument, materials: &HashMap<String, Material>) -> R
                 face.indices[index],
                 face.indices[index + 1],
             ];
+            let positions = triangle.map(|face_index| normalized[face_index.position]);
+            let uvs = triangle.map(|face_index| {
+                face_index
+                    .texture
+                    .map(|texture| document.texture_coordinates[texture])
+                    .unwrap_or_else(|| generated_uv(normalized[face_index.position]))
+            });
+            let face_normal = (positions[1] - positions[0])
+                .cross(positions[2] - positions[0])
+                .normalized();
+            let (tangent, bitangent) = tangent_basis(positions, uvs, face_normal);
+
             for face_index in triangle {
                 let position = normalized[face_index.position];
                 let uv = face_index
                     .texture
                     .map(|texture| document.texture_coordinates[texture])
                     .unwrap_or_else(|| generated_uv(position));
+                let normal = face_index
+                    .normal
+                    .map(|normal| document.normals[normal])
+                    .unwrap_or(face_normal);
                 vertices.push(Vertex {
                     position,
-                    color: Vec3::new(shade, shade, shade),
+                    color,
                     uv,
+                    normal,
+                    tangent,
+                    bitangent,
                 });
             }
         }
@@ -173,6 +209,7 @@ fn build_mesh(document: ObjDocument, materials: &HashMap<String, Material>) -> R
                 first_vertex,
                 vertex_count: vertices.len() - first_vertex,
                 texture,
+                normal_map,
             },
         );
     }
@@ -180,6 +217,7 @@ fn build_mesh(document: ObjDocument, materials: &HashMap<String, Material>) -> R
     Ok(Mesh {
         vertices,
         textures,
+        normal_maps,
         batches,
         has_material_library,
     })
@@ -190,6 +228,7 @@ fn resolve_material_texture(
     materials: &HashMap<String, Material>,
     textures: &mut Vec<PathBuf>,
     texture_indices: &mut HashMap<PathBuf, usize>,
+    kind: MaterialTexture,
 ) -> Result<Option<usize>> {
     let Some(name) = material_name else {
         return Ok(None);
@@ -197,7 +236,11 @@ fn resolve_material_texture(
     let material = materials
         .get(name)
         .ok_or_else(|| obj_error(0, format!("material '{name}' is not defined")))?;
-    let Some(path) = &material.diffuse_texture else {
+    let path = match kind {
+        MaterialTexture::Diffuse => &material.diffuse_texture,
+        MaterialTexture::Normal => &material.normal_texture,
+    };
+    let Some(path) = path else {
         return Ok(None);
     };
     if let Some(&index) = texture_indices.get(path) {
@@ -210,9 +253,25 @@ fn resolve_material_texture(
     Ok(Some(index))
 }
 
+fn material_color(
+    material_name: Option<&str>,
+    materials: &HashMap<String, Material>,
+) -> Option<Vec3> {
+    material_name
+        .and_then(|name| materials.get(name))
+        .and_then(|material| material.diffuse_color)
+}
+
+#[derive(Clone, Copy)]
+enum MaterialTexture {
+    Diffuse,
+    Normal,
+}
+
 fn push_batch(batches: &mut Vec<DrawBatch>, batch: DrawBatch) {
     if let Some(previous) = batches.last_mut() {
         if previous.texture == batch.texture
+            && previous.normal_map == batch.normal_map
             && previous.first_vertex + previous.vertex_count == batch.first_vertex
         {
             previous.vertex_count += batch.vertex_count;
@@ -249,6 +308,7 @@ fn parse_face_index(
     field: &str,
     position_count: usize,
     texture_count: usize,
+    normal_count: usize,
     line: usize,
 ) -> Result<FaceIndex> {
     let mut parts = field.split('/');
@@ -257,8 +317,16 @@ fn parse_face_index(
         Some("") | None => None,
         Some(value) => Some(resolve_index(value, texture_count, line, "texture")?),
     };
+    let normal = match parts.next() {
+        Some("") | None => None,
+        Some(value) => Some(resolve_index(value, normal_count, line, "normal")?),
+    };
 
-    Ok(FaceIndex { position, texture })
+    Ok(FaceIndex {
+        position,
+        texture,
+        normal,
+    })
 }
 
 fn resolve_index(value: &str, count: usize, line: usize, label: &str) -> Result<usize> {
@@ -311,9 +379,38 @@ fn generated_uv(position: Vec3) -> Vec2 {
     )
 }
 
-fn face_shade(index: usize) -> f32 {
+fn tangent_basis(positions: [Vec3; 3], uvs: [Vec2; 3], normal: Vec3) -> (Vec3, Vec3) {
+    let edge1 = positions[1] - positions[0];
+    let edge2 = positions[2] - positions[0];
+    let delta_uv1 = Vec2::new(uvs[1].x - uvs[0].x, uvs[1].y - uvs[0].y);
+    let delta_uv2 = Vec2::new(uvs[2].x - uvs[0].x, uvs[2].y - uvs[0].y);
+    let determinant = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
+
+    if determinant.abs() <= f32::EPSILON {
+        return fallback_tangent_basis(normal);
+    }
+
+    let scale = 1.0 / determinant;
+    let tangent = ((edge1 * delta_uv2.y) - (edge2 * delta_uv1.y)) * scale;
+    let bitangent = ((edge2 * delta_uv1.x) - (edge1 * delta_uv2.x)) * scale;
+    (tangent.normalized(), bitangent.normalized())
+}
+
+fn fallback_tangent_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let helper = if normal.y.abs() < 0.9 {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let tangent = helper.cross(normal).normalized();
+    let bitangent = normal.cross(tangent).normalized();
+    (tangent, bitangent)
+}
+
+fn generated_face_color(index: usize) -> Vec3 {
     const SHADES: [f32; 6] = [0.28, 0.40, 0.52, 0.64, 0.76, 0.88];
-    SHADES[index % SHADES.len()]
+    let shade = SHADES[index % SHADES.len()];
+    Vec3::new(shade, shade, shade)
 }
 
 fn obj_error(line: usize, message: impl Into<String>) -> AppError {
@@ -382,7 +479,9 @@ mod tests {
         let materials = HashMap::from([(
             "painted".into(),
             Material {
+                diffuse_color: None,
                 diffuse_texture: Some(PathBuf::from("paint.ppm")),
+                normal_texture: None,
             },
         )]);
 
@@ -409,7 +508,9 @@ mod tests {
         let materials = HashMap::from([(
             "painted".into(),
             Material {
+                diffuse_color: None,
                 diffuse_texture: Some(PathBuf::from("paint.ppm")),
+                normal_texture: None,
             },
         )]);
 
@@ -440,6 +541,32 @@ mod tests {
     }
 
     #[test]
+    fn usemtl_assigns_diffuse_color_to_vertices() {
+        let document = parse_document(
+            "\
+            mtllib tree.mtl\n\
+            v 0 0 0\n\
+            v 1 0 0\n\
+            v 0 1 0\n\
+            usemtl bark\n\
+            f 1 2 3\n",
+        )
+        .unwrap();
+        let materials = HashMap::from([(
+            "bark".into(),
+            Material {
+                diffuse_color: Some(Vec3::new(0.2, 0.1, 0.05)),
+                diffuse_texture: None,
+                normal_texture: None,
+            },
+        )]);
+
+        let mesh = build_mesh(document, &materials).unwrap();
+
+        assert_eq!(mesh.vertices[0].color, Vec3::new(0.2, 0.1, 0.05));
+    }
+
+    #[test]
     fn load_resolves_42_material_texture_from_mtl_file() {
         let mesh = load(std::path::Path::new("assets/42.obj")).unwrap();
 
@@ -450,9 +577,10 @@ mod tests {
     fn load_resolves_cottage_diffuse_texture_from_mtl_file() {
         let mesh = load(std::path::Path::new("assets/cottage_obj.obj")).unwrap();
 
+        assert_eq!(mesh.textures, [PathBuf::from("assets/cottage_diffuse.ppm")]);
         assert_eq!(
-            mesh.textures,
-            [PathBuf::from("../assets/cottage_diffuse.ppm")]
+            mesh.normal_maps,
+            [PathBuf::from("assets/cottage_normal.ppm")]
         );
     }
 }

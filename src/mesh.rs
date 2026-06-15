@@ -8,12 +8,16 @@ pub struct Vertex {
     pub position: Vec3,
     pub color: Vec3,
     pub uv: Vec2,
+    pub normal: Vec3,
+    pub tangent: Vec3,
+    pub bitangent: Vec3,
 }
 
 #[derive(Debug)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub textures: Vec<PathBuf>,
+    pub normal_maps: Vec<PathBuf>,
     pub batches: Vec<DrawBatch>,
     pub has_material_library: bool,
 }
@@ -23,6 +27,7 @@ pub struct DrawBatch {
     pub first_vertex: usize,
     pub vertex_count: usize,
     pub texture: Option<usize>,
+    pub normal_map: Option<usize>,
 }
 
 impl Mesh {

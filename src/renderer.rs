@@ -16,10 +16,13 @@ pub struct Renderer {
     vertex_array: u32,
     vertex_buffer: u32,
     textures: Vec<u32>,
+    normal_maps: Vec<u32>,
+    fallback_normal_map: u32,
     batches: Vec<RenderBatch>,
     fallback_texture: usize,
     use_fallback_for_untextured: bool,
     mvp_location: i32,
+    model_location: i32,
     blend_location: i32,
 }
 
@@ -28,16 +31,31 @@ struct RenderBatch {
     first_vertex: i32,
     vertex_count: i32,
     texture: Option<usize>,
+    normal_map: Option<usize>,
 }
 
 impl Renderer {
-    pub fn new(mesh: &Mesh, material_textures: &[Image], fallback: &Image) -> Result<Self> {
+    pub fn new(
+        mesh: &Mesh,
+        material_textures: &[Image],
+        normal_maps: &[Image],
+        fallback: &Image,
+    ) -> Result<Self> {
         if material_textures.len() != mesh.textures.len() {
             return Err(AppError::OpenGl(
                 "material texture count does not match the mesh".into(),
             ));
         }
-        for image in material_textures.iter().chain(std::iter::once(fallback)) {
+        if normal_maps.len() != mesh.normal_maps.len() {
+            return Err(AppError::OpenGl(
+                "normal map count does not match the mesh".into(),
+            ));
+        }
+        for image in material_textures
+            .iter()
+            .chain(normal_maps)
+            .chain(std::iter::once(fallback))
+        {
             validate_texture_dimensions(image)?;
         }
         let batches = mesh
@@ -84,9 +102,37 @@ impl Renderer {
                 stride,
                 (size_of::<f32>() * 6) as *const c_void,
             );
+            gl::EnableVertexAttribArray(3);
+            gl::VertexAttribPointer(
+                3,
+                3,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                (size_of::<f32>() * 8) as *const c_void,
+            );
+            gl::EnableVertexAttribArray(4);
+            gl::VertexAttribPointer(
+                4,
+                3,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                (size_of::<f32>() * 11) as *const c_void,
+            );
+            gl::EnableVertexAttribArray(5);
+            gl::VertexAttribPointer(
+                5,
+                3,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                (size_of::<f32>() * 14) as *const c_void,
+            );
 
             gl::UseProgram(program);
             gl::Uniform1i(gl::GetUniformLocation(program, c"u_texture".as_ptr()), 0);
+            gl::Uniform1i(gl::GetUniformLocation(program, c"u_normal_map".as_ptr()), 1);
             gl::Enable(gl::DEPTH_TEST);
         }
 
@@ -95,13 +141,18 @@ impl Renderer {
             textures.push(upload_texture(image));
         }
         let fallback_texture = textures.len() - 1;
+        let normal_maps = normal_maps.iter().map(upload_texture).collect::<Vec<_>>();
+        let fallback_normal_map = upload_texture(&flat_normal_map());
 
         let mvp_location = unsafe { gl::GetUniformLocation(program, c"u_mvp".as_ptr()) };
+        let model_location = unsafe { gl::GetUniformLocation(program, c"u_model".as_ptr()) };
         let blend_location =
             unsafe { gl::GetUniformLocation(program, c"u_texture_blend".as_ptr()) };
-        if mvp_location < 0 || blend_location < 0 {
+        if mvp_location < 0 || model_location < 0 || blend_location < 0 {
             unsafe {
                 gl::DeleteTextures(textures.len() as i32, textures.as_ptr());
+                gl::DeleteTextures(normal_maps.len() as i32, normal_maps.as_ptr());
+                gl::DeleteTextures(1, &fallback_normal_map);
                 gl::DeleteBuffers(1, &vertex_buffer);
                 gl::DeleteVertexArrays(1, &vertex_array);
                 gl::DeleteProgram(program);
@@ -116,21 +167,25 @@ impl Renderer {
             vertex_array,
             vertex_buffer,
             textures,
+            normal_maps,
+            fallback_normal_map,
             batches,
             fallback_texture,
             use_fallback_for_untextured: !mesh.has_material_library,
             mvp_location,
+            model_location,
             blend_location,
         })
     }
 
-    pub fn draw(&self, mvp: &Mat4, texture_blend: f32, framebuffer_size: (i32, i32)) {
+    pub fn draw(&self, mvp: &Mat4, model: &Mat4, texture_blend: f32, framebuffer_size: (i32, i32)) {
         unsafe {
             gl::Viewport(0, 0, framebuffer_size.0, framebuffer_size.1);
             gl::ClearColor(0.055, 0.06, 0.075, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             gl::UseProgram(self.program);
             gl::UniformMatrix4fv(self.mvp_location, 1, gl::FALSE, mvp.as_ptr());
+            gl::UniformMatrix4fv(self.model_location, 1, gl::FALSE, model.as_ptr());
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindVertexArray(self.vertex_array);
             for batch in &self.batches {
@@ -147,8 +202,15 @@ impl Renderer {
                     },
                 );
                 if let Some(texture) = texture {
+                    gl::ActiveTexture(gl::TEXTURE0);
                     gl::BindTexture(gl::TEXTURE_2D, self.textures[texture]);
                 }
+                let normal_map = batch
+                    .normal_map
+                    .map(|normal_map| self.normal_maps[normal_map])
+                    .unwrap_or(self.fallback_normal_map);
+                gl::ActiveTexture(gl::TEXTURE1);
+                gl::BindTexture(gl::TEXTURE_2D, normal_map);
                 gl::DrawArrays(gl::TRIANGLES, batch.first_vertex, batch.vertex_count);
             }
         }
@@ -159,6 +221,8 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             gl::DeleteTextures(self.textures.len() as i32, self.textures.as_ptr());
+            gl::DeleteTextures(self.normal_maps.len() as i32, self.normal_maps.as_ptr());
+            gl::DeleteTextures(1, &self.fallback_normal_map);
             gl::DeleteBuffers(1, &self.vertex_buffer);
             gl::DeleteVertexArrays(1, &self.vertex_array);
             gl::DeleteProgram(self.program);
@@ -176,6 +240,7 @@ impl TryFrom<DrawBatch> for RenderBatch {
             vertex_count: i32::try_from(batch.vertex_count)
                 .map_err(|_| AppError::OpenGl("a draw batch has too many vertices".into()))?,
             texture: batch.texture,
+            normal_map: batch.normal_map,
         })
     }
 }
@@ -215,6 +280,14 @@ fn upload_texture(image: &Image) -> u32 {
         gl::GenerateMipmap(gl::TEXTURE_2D);
     }
     texture
+}
+
+fn flat_normal_map() -> Image {
+    Image {
+        width: 1,
+        height: 1,
+        pixels: vec![128, 128, 255],
+    }
 }
 
 fn flip_rows(image: &Image) -> Vec<u8> {
