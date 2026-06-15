@@ -1,10 +1,12 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, Result};
 use crate::math::{Vec2, Vec3};
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::{DrawBatch, Mesh, Vertex};
+use crate::mtl::{self, Material};
 
 #[derive(Clone, Copy, Debug)]
 struct FaceIndex {
@@ -12,18 +14,45 @@ struct FaceIndex {
     texture: Option<usize>,
 }
 
+#[derive(Debug)]
+struct Face {
+    indices: Vec<FaceIndex>,
+    material: Option<String>,
+}
+
+#[derive(Debug)]
+struct ObjDocument {
+    positions: Vec<Vec3>,
+    texture_coordinates: Vec<Vec2>,
+    faces: Vec<Face>,
+    material_libraries: Vec<PathBuf>,
+}
+
 pub fn load(path: &Path) -> Result<Mesh> {
     let source = fs::read_to_string(path).map_err(|source| AppError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    parse(&source)
+    let document = parse_document(&source)?;
+    let directory = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut materials = HashMap::new();
+    for library in &document.material_libraries {
+        materials.extend(mtl::load(&directory.join(library))?);
+    }
+    build_mesh(document, &materials)
 }
 
+#[cfg(test)]
 fn parse(source: &str) -> Result<Mesh> {
+    build_mesh(parse_document(source)?, &HashMap::new())
+}
+
+fn parse_document(source: &str) -> Result<ObjDocument> {
     let mut positions = Vec::new();
     let mut texture_coordinates = Vec::new();
     let mut faces = Vec::new();
+    let mut material_libraries = Vec::new();
+    let mut current_material = None;
 
     for (line_index, raw_line) in source.lines().enumerate() {
         let line_number = line_index + 1;
@@ -36,8 +65,22 @@ fn parse(source: &str) -> Result<Mesh> {
         match fields.next() {
             Some("v") => positions.push(parse_position(fields, line_number)?),
             Some("vt") => texture_coordinates.push(parse_texture_coordinate(fields, line_number)?),
+            Some("mtllib") => {
+                let libraries = fields.map(PathBuf::from).collect::<Vec<_>>();
+                if libraries.is_empty() {
+                    return Err(obj_error(line_number, "missing material library path"));
+                }
+                material_libraries.extend(libraries);
+            }
+            Some("usemtl") => {
+                let name = fields.collect::<Vec<_>>().join(" ");
+                if name.is_empty() {
+                    return Err(obj_error(line_number, "missing material name"));
+                }
+                current_material = Some(name);
+            }
             Some("f") => {
-                let face = fields
+                let indices = fields
                     .map(|field| {
                         parse_face_index(
                             field,
@@ -47,13 +90,16 @@ fn parse(source: &str) -> Result<Mesh> {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                if face.len() < 3 {
+                if indices.len() < 3 {
                     return Err(obj_error(
                         line_number,
                         "a face needs at least three vertices",
                     ));
                 }
-                faces.push(face);
+                faces.push(Face {
+                    indices,
+                    material: current_material.clone(),
+                });
             }
             _ => {}
         }
@@ -66,24 +112,53 @@ fn parse(source: &str) -> Result<Mesh> {
         return Err(obj_error(0, "the model does not contain any faces"));
     }
 
-    let (center, scale) = normalization(&positions)?;
-    let normalized = positions
+    Ok(ObjDocument {
+        positions,
+        texture_coordinates,
+        faces,
+        material_libraries,
+    })
+}
+
+fn build_mesh(document: ObjDocument, materials: &HashMap<String, Material>) -> Result<Mesh> {
+    let has_material_library = !document.material_libraries.is_empty();
+    let (center, scale) = normalization(&document.positions)?;
+    let normalized = document
+        .positions
         .iter()
         .map(|position| (*position - center) * scale)
         .collect::<Vec<_>>();
 
-    let triangle_count: usize = faces.iter().map(|face| face.len() - 2).sum();
+    let triangle_count: usize = document
+        .faces
+        .iter()
+        .map(|face| face.indices.len() - 2)
+        .sum();
     let mut vertices = Vec::with_capacity(triangle_count * 3);
+    let mut textures = Vec::new();
+    let mut texture_indices = HashMap::new();
+    let mut batches = Vec::new();
 
-    for (face_index, face) in faces.into_iter().enumerate() {
+    for (face_index, face) in document.faces.into_iter().enumerate() {
         let shade = face_shade(face_index);
-        for index in 1..face.len() - 1 {
-            let triangle = [face[0], face[index], face[index + 1]];
+        let texture = resolve_material_texture(
+            face.material.as_deref(),
+            materials,
+            &mut textures,
+            &mut texture_indices,
+        )?;
+        let first_vertex = vertices.len();
+        for index in 1..face.indices.len() - 1 {
+            let triangle = [
+                face.indices[0],
+                face.indices[index],
+                face.indices[index + 1],
+            ];
             for face_index in triangle {
                 let position = normalized[face_index.position];
                 let uv = face_index
                     .texture
-                    .map(|texture| texture_coordinates[texture])
+                    .map(|texture| document.texture_coordinates[texture])
                     .unwrap_or_else(|| generated_uv(position));
                 vertices.push(Vertex {
                     position,
@@ -92,9 +167,59 @@ fn parse(source: &str) -> Result<Mesh> {
                 });
             }
         }
+        push_batch(
+            &mut batches,
+            DrawBatch {
+                first_vertex,
+                vertex_count: vertices.len() - first_vertex,
+                texture,
+            },
+        );
     }
 
-    Ok(Mesh { vertices })
+    Ok(Mesh {
+        vertices,
+        textures,
+        batches,
+        has_material_library,
+    })
+}
+
+fn resolve_material_texture(
+    material_name: Option<&str>,
+    materials: &HashMap<String, Material>,
+    textures: &mut Vec<PathBuf>,
+    texture_indices: &mut HashMap<PathBuf, usize>,
+) -> Result<Option<usize>> {
+    let Some(name) = material_name else {
+        return Ok(None);
+    };
+    let material = materials
+        .get(name)
+        .ok_or_else(|| obj_error(0, format!("material '{name}' is not defined")))?;
+    let Some(path) = &material.diffuse_texture else {
+        return Ok(None);
+    };
+    if let Some(&index) = texture_indices.get(path) {
+        return Ok(Some(index));
+    }
+
+    let index = textures.len();
+    textures.push(path.clone());
+    texture_indices.insert(path.clone(), index);
+    Ok(Some(index))
+}
+
+fn push_batch(batches: &mut Vec<DrawBatch>, batch: DrawBatch) {
+    if let Some(previous) = batches.last_mut() {
+        if previous.texture == batch.texture
+            && previous.first_vertex + previous.vertex_count == batch.first_vertex
+        {
+            previous.vertex_count += batch.vertex_count;
+            return;
+        }
+    }
+    batches.push(batch);
 }
 
 fn parse_position<'a>(mut fields: impl Iterator<Item = &'a str>, line: usize) -> Result<Vec3> {
@@ -200,7 +325,12 @@ fn obj_error(line: usize, message: impl Into<String>) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use crate::mtl::Material;
+
+    use super::{build_mesh, load, parse, parse_document};
 
     #[test]
     fn triangulates_polygons_and_centers_the_model() {
@@ -235,5 +365,94 @@ mod tests {
 
         assert_eq!(mesh.vertices[0].uv.x, 0.1);
         assert_eq!(mesh.vertices[2].uv.y, 0.8);
+    }
+
+    #[test]
+    fn usemtl_assigns_diffuse_texture_to_draw_batch() {
+        let document = parse_document(
+            "\
+            mtllib painted.mtl\n\
+            v 0 0 0\n\
+            v 1 0 0\n\
+            v 0 1 0\n\
+            usemtl painted\n\
+            f 1 2 3\n",
+        )
+        .unwrap();
+        let materials = HashMap::from([(
+            "painted".into(),
+            Material {
+                diffuse_texture: Some(PathBuf::from("paint.ppm")),
+            },
+        )]);
+
+        let mesh = build_mesh(document, &materials).unwrap();
+
+        assert_eq!(mesh.batches[0].texture, Some(0));
+        assert_eq!(mesh.textures, [PathBuf::from("paint.ppm")]);
+        assert!(mesh.has_material_library);
+    }
+
+    #[test]
+    fn consecutive_faces_with_same_material_share_draw_batch() {
+        let document = parse_document(
+            "\
+            v 0 0 0\n\
+            v 1 0 0\n\
+            v 0 1 0\n\
+            v 1 1 0\n\
+            usemtl painted\n\
+            f 1 2 3\n\
+            f 2 4 3\n",
+        )
+        .unwrap();
+        let materials = HashMap::from([(
+            "painted".into(),
+            Material {
+                diffuse_texture: Some(PathBuf::from("paint.ppm")),
+            },
+        )]);
+
+        let mesh = build_mesh(document, &materials).unwrap();
+
+        assert_eq!(mesh.batches.len(), 1);
+        assert_eq!(mesh.batches[0].vertex_count, 6);
+    }
+
+    #[test]
+    fn undefined_material_returns_obj_error() {
+        let document = parse_document(
+            "\
+            v 0 0 0\n\
+            v 1 0 0\n\
+            v 0 1 0\n\
+            usemtl missing\n\
+            f 1 2 3\n",
+        )
+        .unwrap();
+
+        let error = build_mesh(document, &HashMap::new()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid OBJ at line 0: material 'missing' is not defined"
+        );
+    }
+
+    #[test]
+    fn load_resolves_42_material_texture_from_mtl_file() {
+        let mesh = load(std::path::Path::new("assets/42.obj")).unwrap();
+
+        assert_eq!(mesh.textures, [PathBuf::from("assets/texture.ppm")]);
+    }
+
+    #[test]
+    fn load_resolves_cottage_diffuse_texture_from_mtl_file() {
+        let mesh = load(std::path::Path::new("assets/cottage_obj.obj")).unwrap();
+
+        assert_eq!(
+            mesh.textures,
+            [PathBuf::from("../assets/cottage_diffuse.ppm")]
+        );
     }
 }

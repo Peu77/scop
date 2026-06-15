@@ -4,7 +4,7 @@ use std::ptr;
 
 use crate::error::{AppError, Result};
 use crate::math::Mat4;
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::{DrawBatch, Mesh, Vertex};
 use crate::ppm::Image;
 use crate::shader;
 
@@ -15,25 +15,41 @@ pub struct Renderer {
     program: u32,
     vertex_array: u32,
     vertex_buffer: u32,
-    texture: u32,
-    vertex_count: i32,
+    textures: Vec<u32>,
+    batches: Vec<RenderBatch>,
+    fallback_texture: usize,
+    use_fallback_for_untextured: bool,
     mvp_location: i32,
     blend_location: i32,
 }
 
+#[derive(Clone, Copy)]
+struct RenderBatch {
+    first_vertex: i32,
+    vertex_count: i32,
+    texture: Option<usize>,
+}
+
 impl Renderer {
-    pub fn new(mesh: &Mesh, texture: &Image) -> Result<Self> {
-        let vertex_count = i32::try_from(mesh.vertices.len())
-            .map_err(|_| AppError::OpenGl("the model has too many vertices".into()))?;
-        let texture_width = i32::try_from(texture.width)
-            .map_err(|_| AppError::OpenGl("the texture is too wide".into()))?;
-        let texture_height = i32::try_from(texture.height)
-            .map_err(|_| AppError::OpenGl("the texture is too tall".into()))?;
+    pub fn new(mesh: &Mesh, material_textures: &[Image], fallback: &Image) -> Result<Self> {
+        if material_textures.len() != mesh.textures.len() {
+            return Err(AppError::OpenGl(
+                "material texture count does not match the mesh".into(),
+            ));
+        }
+        for image in material_textures.iter().chain(std::iter::once(fallback)) {
+            validate_texture_dimensions(image)?;
+        }
+        let batches = mesh
+            .batches
+            .iter()
+            .copied()
+            .map(RenderBatch::try_from)
+            .collect::<Result<Vec<_>>>()?;
 
         let program = shader::load_program(VERTEX_SHADER, FRAGMENT_SHADER)?;
         let mut vertex_array = 0;
         let mut vertex_buffer = 0;
-        let mut texture_id = 0;
 
         unsafe {
             gl::GenVertexArrays(1, &mut vertex_array);
@@ -69,41 +85,23 @@ impl Renderer {
                 (size_of::<f32>() * 6) as *const c_void,
             );
 
-            gl::GenTextures(1, &mut texture_id);
-            gl::BindTexture(gl::TEXTURE_2D, texture_id);
-            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
-            gl::TexParameteri(
-                gl::TEXTURE_2D,
-                gl::TEXTURE_MIN_FILTER,
-                gl::LINEAR_MIPMAP_LINEAR as i32,
-            );
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            gl::TexImage2D(
-                gl::TEXTURE_2D,
-                0,
-                gl::RGB as i32,
-                texture_width,
-                texture_height,
-                0,
-                gl::RGB,
-                gl::UNSIGNED_BYTE,
-                texture.pixels.as_ptr().cast(),
-            );
-            gl::GenerateMipmap(gl::TEXTURE_2D);
-
             gl::UseProgram(program);
             gl::Uniform1i(gl::GetUniformLocation(program, c"u_texture".as_ptr()), 0);
             gl::Enable(gl::DEPTH_TEST);
         }
+
+        let mut textures = Vec::with_capacity(material_textures.len() + 1);
+        for image in material_textures.iter().chain(std::iter::once(fallback)) {
+            textures.push(upload_texture(image));
+        }
+        let fallback_texture = textures.len() - 1;
 
         let mvp_location = unsafe { gl::GetUniformLocation(program, c"u_mvp".as_ptr()) };
         let blend_location =
             unsafe { gl::GetUniformLocation(program, c"u_texture_blend".as_ptr()) };
         if mvp_location < 0 || blend_location < 0 {
             unsafe {
-                gl::DeleteTextures(1, &texture_id);
+                gl::DeleteTextures(textures.len() as i32, textures.as_ptr());
                 gl::DeleteBuffers(1, &vertex_buffer);
                 gl::DeleteVertexArrays(1, &vertex_array);
                 gl::DeleteProgram(program);
@@ -117,8 +115,10 @@ impl Renderer {
             program,
             vertex_array,
             vertex_buffer,
-            texture: texture_id,
-            vertex_count,
+            textures,
+            batches,
+            fallback_texture,
+            use_fallback_for_untextured: !mesh.has_material_library,
             mvp_location,
             blend_location,
         })
@@ -131,11 +131,26 @@ impl Renderer {
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             gl::UseProgram(self.program);
             gl::UniformMatrix4fv(self.mvp_location, 1, gl::FALSE, mvp.as_ptr());
-            gl::Uniform1f(self.blend_location, texture_blend);
             gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, self.texture);
             gl::BindVertexArray(self.vertex_array);
-            gl::DrawArrays(gl::TRIANGLES, 0, self.vertex_count);
+            for batch in &self.batches {
+                let texture = batch.texture.or_else(|| {
+                    self.use_fallback_for_untextured
+                        .then_some(self.fallback_texture)
+                });
+                gl::Uniform1f(
+                    self.blend_location,
+                    if texture.is_some() {
+                        texture_blend
+                    } else {
+                        0.0
+                    },
+                );
+                if let Some(texture) = texture {
+                    gl::BindTexture(gl::TEXTURE_2D, self.textures[texture]);
+                }
+                gl::DrawArrays(gl::TRIANGLES, batch.first_vertex, batch.vertex_count);
+            }
         }
     }
 }
@@ -143,10 +158,88 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            gl::DeleteTextures(1, &self.texture);
+            gl::DeleteTextures(self.textures.len() as i32, self.textures.as_ptr());
             gl::DeleteBuffers(1, &self.vertex_buffer);
             gl::DeleteVertexArrays(1, &self.vertex_array);
             gl::DeleteProgram(self.program);
         }
+    }
+}
+
+impl TryFrom<DrawBatch> for RenderBatch {
+    type Error = AppError;
+
+    fn try_from(batch: DrawBatch) -> Result<Self> {
+        Ok(Self {
+            first_vertex: i32::try_from(batch.first_vertex)
+                .map_err(|_| AppError::OpenGl("the model has too many vertices".into()))?,
+            vertex_count: i32::try_from(batch.vertex_count)
+                .map_err(|_| AppError::OpenGl("a draw batch has too many vertices".into()))?,
+            texture: batch.texture,
+        })
+    }
+}
+
+fn validate_texture_dimensions(image: &Image) -> Result<()> {
+    i32::try_from(image.width).map_err(|_| AppError::OpenGl("a texture is too wide".into()))?;
+    i32::try_from(image.height).map_err(|_| AppError::OpenGl("a texture is too tall".into()))?;
+    Ok(())
+}
+
+fn upload_texture(image: &Image) -> u32 {
+    let mut texture = 0;
+    let pixels = flip_rows(image);
+    unsafe {
+        gl::GenTextures(1, &mut texture);
+        gl::BindTexture(gl::TEXTURE_2D, texture);
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::REPEAT as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::REPEAT as i32);
+        gl::TexParameteri(
+            gl::TEXTURE_2D,
+            gl::TEXTURE_MIN_FILTER,
+            gl::LINEAR_MIPMAP_LINEAR as i32,
+        );
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+        gl::TexImage2D(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGB as i32,
+            image.width as i32,
+            image.height as i32,
+            0,
+            gl::RGB,
+            gl::UNSIGNED_BYTE,
+            pixels.as_ptr().cast(),
+        );
+        gl::GenerateMipmap(gl::TEXTURE_2D);
+    }
+    texture
+}
+
+fn flip_rows(image: &Image) -> Vec<u8> {
+    let row_size = image.width as usize * 3;
+    let mut pixels = Vec::with_capacity(image.pixels.len());
+    for row in image.pixels.chunks_exact(row_size).rev() {
+        pixels.extend_from_slice(row);
+    }
+    pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ppm::Image;
+
+    use super::flip_rows;
+
+    #[test]
+    fn flip_rows_converts_ppm_top_left_origin_for_opengl() {
+        let image = Image {
+            width: 1,
+            height: 2,
+            pixels: vec![1, 2, 3, 4, 5, 6],
+        };
+
+        assert_eq!(flip_rows(&image), [4, 5, 6, 1, 2, 3]);
     }
 }
