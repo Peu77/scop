@@ -82,3 +82,97 @@ impl Div<f32> for Vec3 {
         Self::new(self.x / rhs, self.y / rhs, self.z / rhs)
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mat4 {
+    values: [f32; 16],
+}
+
+impl Mat4 {
+    pub const fn identity() -> Self {
+        Self {
+            values: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    pub fn translation(offset: Vec3) -> Self {
+        let mut matrix = Self::identity();
+        matrix.values[12] = offset.x;
+        matrix.values[13] = offset.y;
+        matrix.values[14] = offset.z;
+        matrix
+    }
+
+    pub fn rotation_y(angle: f32) -> Self {
+        let (sin, cos) = angle.sin_cos();
+        Self {
+            values: [
+                cos, 0.0, -sin, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                sin, 0.0, cos, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+
+    pub fn perspective(vertical_fov: f32, aspect: f32, near: f32, far: f32) -> Self {
+        let scale = 1.0 / (vertical_fov * 0.5).tan();
+        Self {
+            values: [
+                scale / aspect,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                scale,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                (far + near) / (near - far),
+                -1.0,
+                0.0,
+                0.0,
+                (2.0 * far * near) / (near - far),
+                0.0,
+            ],
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const f32 {
+        self.values.as_ptr()
+    }
+}
+
+impl Mul for Mat4 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        let mut values = [0.0; 16];
+        for column in 0..4 {
+            for row in 0..4 {
+                values[column * 4 + row] = (0..4)
+                    .map(|index| self.values[index * 4 + row] * rhs.values[column * 4 + index])
+                    .sum();
+            }
+        }
+        Self { values }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mat4, Vec3};
+
+    #[test]
+    fn identity_does_not_change_a_matrix() {
+        let matrix = Mat4::translation(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(Mat4::identity() * matrix, matrix);
+        assert_eq!(matrix * Mat4::identity(), matrix);
+    }
+}
