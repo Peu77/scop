@@ -584,4 +584,15 @@ mod tests {
             [PathBuf::from("assets/cottage_normal.ppm")]
         );
     }
+
+    #[test]
+    fn load_resolves_teapot_diffuse_and_normal_textures_from_mtl_file() {
+        let mesh = load(std::path::Path::new("assets/teapot2.obj")).unwrap();
+
+        assert_eq!(mesh.textures, [PathBuf::from("assets/texture.ppm")]);
+        assert_eq!(
+            mesh.normal_maps,
+            [PathBuf::from("assets/cottage_normal.ppm")]
+        );
+    }
 }
