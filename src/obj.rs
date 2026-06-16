@@ -571,7 +571,7 @@ mod tests {
     fn load_resolves_42_material_texture_from_mtl_file() {
         let mesh = load(std::path::Path::new("assets/42.obj")).unwrap();
 
-        assert_eq!(mesh.textures, [PathBuf::from("assets/texture.ppm")]);
+        assert_eq!(mesh.textures, [PathBuf::from("assets/unicorn.ppm")]);
     }
 
     #[test]
