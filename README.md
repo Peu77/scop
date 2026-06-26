@@ -1,6 +1,6 @@
 # scop
 
-A dependency-light Rust/OpenGL implementation of the mandatory `scop` project.
+A dependency-light Rust/OpenGL implementation of the `scop` project.
 GLFW is used only for window and event management. OBJ and binary PPM parsing,
 matrix math, shader compilation, animation, and rendering are implemented inside
 the project.
